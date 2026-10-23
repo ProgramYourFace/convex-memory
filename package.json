@@ -1,0 +1,76 @@
+{
+  "name": "convex-memory",
+  "description": "Layered long-term memory for AI agents as a Convex component: a versioned record, background ingest, and budgeted recall",
+  "repository": "github:ProgramYourFace/convex-memory",
+  "homepage": "https://github.com/ProgramYourFace/convex-memory#readme",
+  "bugs": {
+    "url": "https://github.com/ProgramYourFace/convex-memory/issues"
+  },
+  "version": "0.1.0",
+  "license": "MIT",
+  "author": "Christopher Silvas",
+  "keywords": [
+    "convex",
+    "component",
+    "memory",
+    "ai",
+    "agents",
+    "llm",
+    "rag"
+  ],
+  "type": "module",
+  "scripts": {
+    "dev": "convex dev --typecheck-components",
+    "build": "tsc --project ./tsconfig.build.json",
+    "build:codegen": "npx convex codegen --component-dir ./src/component && npm run build",
+    "build:clean": "rm -rf dist *.tsbuildinfo && npm run build",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p example/convex",
+    "test": "vitest run --typecheck",
+    "test:watch": "vitest --typecheck --clearScreen false",
+    "prepare": "npm run build",
+    "preversion": "npm ci && npm run build:clean && npm run test && npm run typecheck"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
+    },
+    "./test": "./src/test.ts",
+    "./_generated/component.js": {
+      "types": "./dist/component/_generated/component.d.ts"
+    },
+    "./_generated/component": {
+      "types": "./dist/component/_generated/component.d.ts"
+    },
+    "./convex.config.js": {
+      "types": "./dist/component/convex.config.d.ts",
+      "default": "./dist/component/convex.config.js"
+    },
+    "./convex.config": {
+      "types": "./dist/component/convex.config.d.ts",
+      "default": "./dist/component/convex.config.js"
+    }
+  },
+  "peerDependencies": {
+    "convex": "^1.47.0"
+  },
+  "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
+    "@types/node": "^24.13.3",
+    "convex": "^1.48.0",
+    "convex-test": "0.0.64",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "vite": "8.2.0",
+    "vitest": "4.1.11"
+  },
+  "types": "./dist/client/index.d.ts",
+  "module": "./dist/client/index.js",
+  "dependencies": {
+    "convex-helpers": "^0.1.129"
+  }
+}
