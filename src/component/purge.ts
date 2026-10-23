@@ -91,8 +91,11 @@ async function eraseTag(ctx: MutationCtx, tag: string): Promise<boolean> {
       .withIndex('by_tag', (q) => q.eq('tag', tag))
       .first();
     if (!ref) return true;
+    // Each tag set costs index reads of its own whatever its rows (its tags, a page per table, its scope rows): charged
+    // to the budget, so a tag held by many small tag sets stays within a mutation's 4,096 index ranges.
+    budget -= LIMITS.scopeEraseCost;
     await tombstone(ctx, ref.scope);
-    budget = await erase(ctx, ref.scope, budget);
+    budget = budget > 0 ? await erase(ctx, ref.scope, budget) : 0;
     if (budget === 0) {
       await ctx.scheduler.runAfter(0, internal.purge.continuePurge, { tag });
       return false;

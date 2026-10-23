@@ -192,6 +192,31 @@ describe('the queue: one drain per scope', () => {
     await settle(w.t);
     expect((await current(w)).map((m) => m.content)).toEqual(['The person lives in Lisbon.']);
   });
+
+  test('the sweep finds every scope with unread messages, however many unread messages come before it', async () => {
+    const w = await world();
+    // Two scopes whose drains were lost: a backlog in one, said before the other's one message.
+    const [a, b] = await w.t.run(async (ctx) => {
+      const ids: Id<'scopes'>[] = [];
+      for (const tag of ['user:a', 'user:b']) {
+        const id = await ctx.db.insert('scopes', { tags: [tag], key: tag, createdAt: Date.now() });
+        await ctx.db.insert('scopeTags', { tag, scope: id });
+        ids.push(id);
+      }
+      const put = (scope: Id<'scopes'>, i: number) =>
+        ctx.db.insert('messages', { scope, tags: [], messageId: i.toString(16).padStart(32, '0'), session: 's', role: 'user', author: 'a', trust: 'trusted', content: `m${i}`, at: i, processed: false, withheld: false });
+      for (let i = 0; i < 600; i++) await put(ids[0]!, i);
+      await put(ids[1]!, 1_000);
+      return ids;
+    });
+    await w.t.mutation(api.sweep.run, {});
+    const queued = await w.t.run(async (ctx) => {
+      // The drains themselves are not run here.
+      for (const f of await ctx.db.system.query('_scheduled_functions').collect()) await ctx.scheduler.cancel(f._id);
+      return [(await ctx.db.get(a!))!.queuedAt, (await ctx.db.get(b!))!.queuedAt];
+    });
+    expect(queued.every((q) => typeof q === 'number')).toBe(true);
+  });
 });
 
 describe('the gate', () => {
@@ -768,6 +793,18 @@ describe('recall', () => {
 });
 
 describe('context', () => {
+  test('a read that reaches no tag set calls no model', async () => {
+    const w = await world();
+    await seed(w);
+    const before = w.g.calls.length;
+    const r = await context(w, { filter: 'user:nobody', turn: 'What do I eat?', budgetTokens: 2000 });
+    expect(r).toMatchObject({ note: '', memories: [], gated: false, usage: { models: [], costMicros: 0 } });
+    scriptWriter(w.g, { analyze: { topics: [], terms: ['diet'], synonyms: [], hyde: 'diet' } });
+    const rc = await recall(w, { filter: 'user:nobody', query: 'What do I eat?', synthesize: true });
+    expect(rc).toMatchObject({ memories: [], messages: [], answer: null });
+    expect(w.g.calls.length).toBe(before);
+  });
+
   test("the gate's no returns the standing instructions only, with no language-model call", async () => {
     const w = await world();
     const s = await seed(w);
@@ -975,6 +1012,15 @@ describe('races at commit', () => {
     expect(await getMemory(w, b.id)).toMatchObject({ supersededAt: null });
     expect(await getMemory(w, 'f'.repeat(32))).toMatchObject({ supersedes: null, confidence: INGEST.conflictConfidence });
     expect((await decisions(w)).some((d) => d.stage === 'commit.moved')).toBe(true);
+  });
+
+  test('a confirmation planned for a memory forgotten meanwhile adds nothing to it', async () => {
+    const w = await world();
+    scriptWriter(w.g, {});
+    const old = (await remember(w, { kind: 'fact', topic: 'person.diet', content: 'The person is vegetarian.' })).memory;
+    await w.t.mutation(api.write.forget, { tags: ME, id: old.id });
+    await w.t.mutation(internal.store.commit, { scope: await sid(w), op: 'ingest', ...empty, processed: [], confirm: [{ id: old.id, sources: ['d'.repeat(32)], step: 0.1 }] });
+    expect(await getMemory(w, old.id)).toMatchObject({ sources: old.sources, confidence: old.confidence });
   });
 
   test('a drain whose lease ran out counts as a failure: one that keeps dying gives its batch up', async () => {

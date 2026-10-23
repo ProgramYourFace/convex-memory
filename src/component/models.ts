@@ -1,6 +1,7 @@
 import type { FunctionHandle } from 'convex/server';
 import { CHARS_PER_TOKEN, DECISION_RESERVE_TOKENS, DECISION_WINDOW, DEFAULT_ROUTING, EMBED_BATCH, EMBEDDING_DIMENSIONS, ENDPOINTS, WRITER_REASONING } from './config.js';
 import type { MemorySettings, MemoryUsage } from './shapes.js';
+import { redactSecrets } from './redact.js';
 import { clip, estimateTokens } from './text.js';
 
 // The engine's models: the decision model on `/alpha/decisions`, the writer on `/v1/chat/completions`, embeddings on
@@ -39,7 +40,12 @@ async function send(ctx: ModelCtx, settings: MemorySettings, path: string, body:
     // not JSON: the status and text say what happened
   }
   const error = json.error as { message?: unknown } | undefined;
-  if (res.status < 200 || res.status >= 300 || error) throw new GatewayError(`Model provider ${res.status}: ${String(error?.message ?? res.text).slice(0, 300)}`, res.status, json.usage ?? null);
+  if (res.status < 200 || res.status >= 300 || error) {
+    // A provider may echo the credential it was sent ("Incorrect API key provided: sk-…"): the message goes to logs and
+    // the decisions table, so key-shaped strings are removed from it first.
+    const said = redactSecrets(String(error?.message ?? res.text)).text.slice(0, 300);
+    throw new GatewayError(`Model provider ${res.status}: ${said}`, res.status, json.usage ?? null);
+  }
   return json;
 }
 

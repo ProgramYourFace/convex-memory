@@ -334,11 +334,15 @@ expose the component's functions to clients directly. Wrap each one in your own 
   code from the user's identity and memberships. Never pass a filter, a tag or a layer that a model or tool chose.
   - A filter that reaches a tag set holding a tag the user may not see leaks it. For example, `{ any: ["team:eng"] }`
     also reaches `["team:eng", "user:bob"]`. Use `not` or `all` to keep such sets out, or never write them.
-  - Purge with `{ tag }` when a person is deleted. Reads of a purged scope return nothing, and writes are refused until
-    `reopen`.
+  - `get`, `history`, `forget` and `restore` name an exact tag set: check that the user may read (or write) that whole
+    set, every tag of it, not just one tag in it.
+  - Purge with `{ tag }` when a person is deleted. From the purge on, no read reaches a tag set holding that tag (even
+    while its rows are still being erased) and no write names it until `reopen`. `purge` and `reopen` are for your
+    app's own admin or deletion code, never for a user's or a model's request.
 - **Trust** on every message and every `remember`.
   - A person's own words are `trusted`.
   - The assistant's words are `trusted` but never vouch for a memory.
+  - A `system` or `note` message marked `trusted` vouches like a person's words: send only text your app wrote.
   - Anything a tool, page, mail or app produced is `untrusted`, including text the person pasted from one when you can
     tell.
   - A `remember` the assistant makes during a turn that read untrusted text is `untrusted` unless the person's own words
@@ -353,8 +357,16 @@ expose the component's functions to clients directly. Wrap each one in your own 
 - **Secrets.** Key- and token-shaped strings are removed before storage, and memories that hold a key or a stated
   password are refused or dropped. Detection cannot catch every secret, so keep secrets out of conversations where you
   can and in a secrets manager. The record keeps what was said, as the conversation does.
-- **The transport** is an internal action. Keep it internal: it would send any request body to your provider with your
-  credentials. It only forwards the three model paths.
+- **The transport** is an internal action. Keep it internal (`TransportReference` accepts only internal functions): it
+  sends any request body to the three model paths with your credentials. The client passes the component a function
+  handle to it, which the component calls with conversation text; pass only your own transport. Nothing else can call
+  the component's functions, since only your app's code can reach `components.memory`.
+- **Settings are stored.** The model settings (the transport's handle, models, `routing`, `prices`) are kept in the
+  component's `settings` table so background drains and the sweep can use them. They hold no credential: keys stay in
+  the transport, read inside it (`apiKey`). Never put a secret in `routing`. Drains use the settings the app sent last,
+  so keep one `Memory` configuration per deployment.
+- **Provider errors** are logged (and a drain that gives up records its last error) with key-shaped strings removed,
+  since some providers echo the credential they were sent.
 
 ## Limits
 
@@ -362,9 +374,13 @@ Each read searches every scope it reaches separately:
 
 - full text: one search per scope, with the results merged by how many of the search's words each row holds;
 - vectors: `or`s of up to 64 scopes per search;
-- topics: the most recently used 2,000 topics, shared among the scopes, at least 50 each.
+- topics: the most recently used 2,000 topics, shared among the scopes, at least 50 each, and at most 16 guessed per
+  scope.
 
-So a read gets slower and its ranking coarser as it reaches more tag sets. A read reaching more than 256 is refused.
+Each search channel reads about 80 rows in all, shared among the scopes (all it asks for from a few scopes, two from
+each of hundreds; `searchHistory`, one query over every scope, at least one), so a read of 256 tag sets stays within
+Convex's 16 MiB and 4,096 index ranges per query even when its messages are long. So a read gets slower and its
+ranking coarser as it reaches more tag sets. A read reaching more than 256 is refused.
 Keep tag sets coarse: tens per read is comfortable, hundreds is the ceiling, and thousands of distinct tag sets behind
 one filter do not work. Writes are not limited by the number of scopes.
 
@@ -378,6 +394,8 @@ one filter do not work. Writes are not limited by the number of scopes.
 | Drain batch | 60 messages or 60,000 characters of one session; 80 items |
 | Full-text search | 16 terms of up to 32 characters (Convex's limit); no stemming, so recall asks the writer for other word forms |
 | Decisions and usage logs | kept 90 days (the sweep deletes older rows) |
+| Sweep | up to 100 scopes with unread messages per run |
+| Purge | up to 500 rows, and about 50 tag sets, per mutation; the rest scheduled |
 
 Every size and threshold is in `src/component/config.ts`.
 

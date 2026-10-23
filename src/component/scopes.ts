@@ -128,19 +128,22 @@ export type Layer = { name: string; filter: TagFilter; weight?: number };
 
 /**
  * The scopes a read reaches: those matching `filter`, and when there are layers, the first layer each matches (one
- * matching no layer is not read). At most LIMITS.readScopes: a broader read is refused (README "Limits"). Purged scopes
- * are never read.
+ * matching no layer is not read). At most LIMITS.readScopes: a broader read is refused (README "Limits"). Purged scopes,
+ * and scopes holding a purged tag (whose erasing may still be under way), are never read.
  */
 export async function resolveScopes(ctx: Pick<QueryCtx, 'db'>, filter: TagFilter, layers: Layer[] = []): Promise<ReadScope[]> {
   const cap = LIMITS.readScopes;
   const found = await candidates(ctx, filter, cap);
   if (!found) return fail('invalid', `That filter reaches more than ${cap} tag sets: narrow it (README "Limits")`);
   const out: ReadScope[] = [];
+  const purged = purgedTagCache(ctx);
   for (const id of found) {
     const s = await ctx.db.get(id);
     if (!s || s.purgedAt !== undefined) continue;
     const tags = new Set(s.tags);
     if (!matches(filter, tags)) continue;
+    // A tag purge erases its tag sets one after another: one not reached yet is already out of every read.
+    if (await purged.any(s.tags)) continue;
     const layer = layers.length ? layers.findIndex((l) => matches(l.filter, tags)) : 0;
     if (layer < 0) continue;
     out.push({ id, tags: s.tags, layer });
@@ -170,22 +173,43 @@ export async function scopeOfTags(ctx: Pick<QueryCtx, 'db'>, tags: string[]): Pr
     .unique();
 }
 
+/** Whether a tag was purged as a whole (`purge({ tag })`, not yet reopened). */
+async function isPurgedTag(ctx: Pick<QueryCtx, 'db'>, tag: string): Promise<boolean> {
+  return !!(await ctx.db
+    .query('purgedTags')
+    .withIndex('by_tag', (q) => q.eq('tag', tag))
+    .first());
+}
+
 /** Whether any of `tags` was purged as a whole. */
 async function anyPurgedTag(ctx: Pick<QueryCtx, 'db'>, tags: string[]): Promise<boolean> {
-  for (const tag of tags)
-    if (
-      await ctx.db
-        .query('purgedTags')
-        .withIndex('by_tag', (q) => q.eq('tag', tag))
-        .first()
-    )
-      return true;
+  for (const tag of tags) if (await isPurgedTag(ctx, tag)) return true;
   return false;
+}
+
+/** `anyPurgedTag` over many scopes, each distinct tag looked up once (a query reads at most 4,096 index ranges). */
+function purgedTagCache(ctx: Pick<QueryCtx, 'db'>) {
+  const known = new Map<string, boolean>();
+  return {
+    async any(tags: string[]): Promise<boolean> {
+      for (const tag of tags) {
+        if (!known.has(tag)) known.set(tag, await isPurgedTag(ctx, tag));
+        if (known.get(tag)) return true;
+      }
+      return false;
+    },
+  };
 }
 
 /** Whether a scope may be written: not purged, and none of its tags purged. */
 export async function writable(ctx: Pick<QueryCtx, 'db'>, scope: Doc<'scopes'> | null): Promise<boolean> {
   return !!scope && scope.purgedAt === undefined && !(await anyPurgedTag(ctx, scope.tags));
+}
+
+/** The scope of a tag set when it may be read: written, and neither it nor any of its tags purged. */
+export async function readableScope(ctx: Pick<QueryCtx, 'db'>, tags: string[]): Promise<Doc<'scopes'> | null> {
+  const s = await scopeOfTags(ctx, tags);
+  return s && (await writable(ctx, s)) ? s : null;
 }
 
 /** The scope of a tag set, made when new; refused when it, or any of its tags, was purged (until reopened). */

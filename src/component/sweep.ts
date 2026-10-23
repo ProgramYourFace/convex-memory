@@ -20,13 +20,18 @@ export const run = mutation({
   handler: async (ctx, a) => {
     if (a.settings) await saveSettings(ctx, a.settings);
     const now = Date.now();
-    // The scopes with unread messages: found from the messages (indexed by unread), not by reading every scope.
-    const unread = await ctx.db
-      .query('messages')
-      .withIndex('by_pending', (q) => q.eq('processed', false))
-      .take(LIMITS.deletePage);
-    for (const id of new Set(unread.map((m) => m.scope))) {
-      const p = await ctx.db.get(id);
+    // The scopes with unread messages: found from the messages (indexed by unread, then scope), one message read per
+    // scope however many it has unread (a backlog of long messages would pass a mutation's 16 MiB), never every scope.
+    let after: Id<'scopes'> | null = null;
+    for (let n = 0; n < LIMITS.sweepScopes; n++) {
+      const from: Id<'scopes'> | null = after;
+      const next: Doc<'messages'> | null = await ctx.db
+        .query('messages')
+        .withIndex('by_pending_scope', (q) => (from ? q.eq('processed', false).gt('scope', from) : q.eq('processed', false)))
+        .first();
+      if (!next) break;
+      after = next.scope;
+      const p = await ctx.db.get(next.scope);
       if (!p || p.purgedAt !== undefined) continue;
       const busy = (p.lease && p.lease.until > now) || (p.queuedAt !== undefined && p.queuedAt > now - QUEUE.leaseMs);
       if (busy) continue;

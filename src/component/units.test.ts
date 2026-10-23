@@ -208,6 +208,20 @@ describe('usage', () => {
   });
 });
 
+describe('provider errors', () => {
+  test('a key a provider echoes in its error never reaches a log or a thrown message', async () => {
+    const key = `sk-proj-${'Ab1'.repeat(16)}`;
+    const m = new Models(
+      fakeCtx(() => ({ status: 401, text: JSON.stringify({ error: { message: `Incorrect API key provided: ${key}` } }) })),
+      GATEWAY,
+    );
+    const e = await m.decide('x', { ok: { type: 'noul', instructions: 'ok?' } }).catch((x: Error) => x);
+    expect(e).toBeInstanceOf(Error);
+    expect((e as Error).message).toContain('401');
+    expect((e as Error).message).not.toContain(key);
+  });
+});
+
 describe('the decision model', () => {
   const questions: Record<string, DecisionQuestion> = {
     ok: { type: 'noul', instructions: 'Is it fine?' },

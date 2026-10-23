@@ -6,6 +6,7 @@ import type { Id } from './_generated/dataModel.js';
 import { LIMITS } from './config.js';
 import { choice, scriptWriter, SETTINGS } from './fakeGateway.testing.js';
 import { context, current, getMemory, ingest, msg, recall, refusal, remember, scopeOf, settle, sid, tick, world, type World } from './harness.testing.js';
+import { perScope } from './read.js';
 import { canonicalTags, checkFilter, keyOf, matches, resolveScopes, type Layer, type TagFilter } from './scopes.js';
 
 describe('filters', () => {
@@ -149,6 +150,23 @@ describe('many scopes at once', () => {
   });
 });
 
+describe("Convex's limits at the most scopes a read reaches", () => {
+  test("each search reads a share of the channel's rows: all of them from a few scopes, a bounded total from many", () => {
+    expect(perScope(20, 1)).toBe(20);
+    expect(perScope(20, 4)).toBe(20);
+    expect(perScope(20, LIMITS.readScopes)).toBe(LIMITS.rowsPerScope);
+    expect(perScope(50, LIMITS.readScopes, 1)).toBe(1);
+    // A message is at most LIMITS.messageChars (up to 3 bytes each in UTF-8 for most scripts); a query reads 16 MiB.
+    const maxMessage = LIMITS.messageChars * 3;
+    const mib16 = 16 * 1024 * 1024;
+    // The actions' channel queries: LIMITS.scopesPerQuery scopes each, messages, full text and topics.
+    expect(LIMITS.scopesPerQuery * perScope(20, LIMITS.readScopes) * maxMessage).toBeLessThan(mib16 / 2);
+    // searchHistory, one query over every scope.
+    expect(LIMITS.readScopes * perScope(50, LIMITS.readScopes, 1) * maxMessage).toBeLessThan(mib16);
+    for (let n = 1; n <= LIMITS.readScopes; n++) expect(n * perScope(50, n, 1)).toBeLessThanOrEqual(Math.max(50, LIMITS.channelRows + n));
+  });
+});
+
 describe('relate stays within one tag set', () => {
   test("a statement under one tag set never supersedes, refines or confirms another's memory", async () => {
     const w = await world();
@@ -273,5 +291,72 @@ describe('purge by tag and by tag set', () => {
     await settle(w.t);
     expect(await w.t.run(async (ctx) => (await ctx.db.query('messages').collect()).filter((x) => x.tags.includes('user:alice')))).toEqual([]);
     expect(await w.t.mutation(api.purge.reopen, { tag: 'user:alice' })).toEqual({ reopened: true });
+  });
+});
+
+describe('a purge in progress', () => {
+  /** Rows enough that a purge needs more than one mutation. */
+  const bulk = (w: World, scope: Id<'scopes'>, tags: string[]) =>
+    w.t.run(async (ctx) => {
+      for (let i = 0; i < 700; i++)
+        await ctx.db.insert('messages', { scope, tags, messageId: i.toString(16).padStart(32, '0'), session: 's', role: 'user', author: 'alice', trust: 'trusted', content: `m${i}`, at: i, processed: true, withheld: false });
+    });
+
+  async function setup(w: World) {
+    scriptWriter(w.g, {});
+    w.g.decide = (q) => Object.fromEntries(Object.keys(q).map((k) => [k, choice('unrelated', 0.95)]));
+    const put = async (tags: string[], content: string) => {
+      await tick();
+      return (await remember(w, { tags, content, kind: 'fact' })).memory;
+    };
+    const alone = await put(['user:alice'], 'Alice likes jazz.');
+    const withTeam = await put(['user:alice', 'team:eng'], 'Alice reviews the eng releases.');
+    const team = await put(['team:eng'], 'The eng team deploys on Tuesdays.');
+    await bulk(w, await sid(w, ['user:alice']), ['user:alice']);
+    return { alone, withTeam, team };
+  }
+
+  test('by tag: no read reaches a tag set holding the tag, though its rows are not erased yet', async () => {
+    const w = await world();
+    const m = await setup(w);
+    expect(await w.t.mutation(api.purge.purge, { tag: 'user:alice' })).toEqual({ done: false });
+    // The second tag set holding the tag is still in the table: every read leaves it out all the same.
+    expect(await scopeOf(w, ['user:alice', 'team:eng'])).not.toBeNull();
+    const listed = await w.t.query(api.read.list, { filter: 'team:eng', paginationOpts: { numItems: 10, cursor: null } });
+    expect(listed.page.map((x) => x.id)).toEqual([m.team.id]);
+    const found = await w.t.query(api.read.searchHistory, { filter: 'team:eng', query: 'eng releases' });
+    expect(found.hits.map((h) => h.id)).not.toContain(m.withTeam.id);
+    expect(await w.t.query(api.read.get, { tags: ['user:alice', 'team:eng'], id: m.withTeam.id })).toBeNull();
+    expect(await w.t.query(api.read.get, { tags: ['user:alice'], id: m.alone.id })).toBeNull();
+    expect((await w.t.query(api.read.history, { tags: ['user:alice', 'team:eng'], id: m.withTeam.id })).versions).toEqual([]);
+    expect((await recall(w, { filter: { any: ['user:alice', 'team:eng'] }, query: 'eng releases jazz' })).memories.map((x) => x.id)).toEqual([m.team.id]);
+    await settle(w.t);
+    expect(await scopeOf(w, ['user:alice', 'team:eng'])).toBeNull();
+  });
+
+  test('by tag set: get and history of the purged set answer nothing', async () => {
+    const w = await world();
+    const m = await setup(w);
+    expect(await w.t.mutation(api.purge.purge, { tags: ['user:alice'] })).toEqual({ done: false });
+    expect(await w.t.query(api.read.get, { tags: ['user:alice'], id: m.alone.id })).toBeNull();
+    expect((await w.t.query(api.read.history, { tags: ['user:alice'], id: m.alone.id })).versions).toEqual([]);
+    // Other tag sets holding the tag are not purged by an exact-set purge.
+    expect(await w.t.query(api.read.get, { tags: ['user:alice', 'team:eng'], id: m.withTeam.id })).not.toBeNull();
+  });
+
+  test("a tag's purge erases a bounded number of tag sets per mutation, the rest scheduled", async () => {
+    const w = await world();
+    const ids = await scopes(
+      w,
+      Array.from({ length: 120 }, (_, i) => ['org', `team:t${i}`]),
+    );
+    await w.t.run(async (ctx) => {
+      for (const [i, scope] of ids.entries())
+        await ctx.db.insert('messages', { scope, tags: ['org', `team:t${i}`], messageId: i.toString(16).padStart(32, '0'), session: 's', role: 'user', author: 'a', trust: 'trusted', content: `m${i}`, at: i, processed: true, withheld: false });
+    });
+    expect(await w.t.mutation(api.purge.purge, { tag: 'org' })).toEqual({ done: false });
+    await settle(w.t);
+    expect(await w.t.run((ctx) => ctx.db.query('scopes').collect())).toEqual([]);
+    expect(await w.t.mutation(api.purge.reopen, { tag: 'org' })).toEqual({ reopened: true });
   });
 });

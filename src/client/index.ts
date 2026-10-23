@@ -17,8 +17,11 @@ type RunQueryCtx = Pick<GenericQueryCtx<GenericDataModel>, 'runQuery'>;
 type RunMutationCtx = Pick<GenericMutationCtx<GenericDataModel>, 'runQuery' | 'runMutation'>;
 type RunActionCtx = Pick<GenericActionCtx<GenericDataModel>, 'runQuery' | 'runMutation' | 'runAction'>;
 
-/** The app's transport action, as `defineModelTransport` defines it. */
-export type TransportReference = FunctionReference<'action', 'internal' | 'public', TransportArgs, TransportResult>;
+/**
+ * The app's transport action, as `defineModelTransport` defines it: internal only, since it sends any request body to the
+ * model paths with the app's credentials.
+ */
+export type TransportReference = FunctionReference<'action', 'internal', TransportArgs, TransportResult>;
 
 export type MemoryOptions = {
   /**

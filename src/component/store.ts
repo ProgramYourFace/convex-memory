@@ -273,10 +273,10 @@ export const claim = internalMutation({
       await ctx.db.patch(p._id, { queuedAt: undefined });
       return null;
     }
+    // Only the session's unread messages are read (a long session's read ones would pass a mutation's 16 MiB).
     const unread = await ctx.db
       .query('messages')
-      .withIndex('by_scope_session', (q) => q.eq('scope', scope).eq('session', first.session).gte('at', first.at))
-      .filter((q) => q.eq(q.field('processed'), false))
+      .withIndex('by_scope_pending_session', (q) => q.eq('scope', scope).eq('processed', false).eq('session', first.session).gte('at', first.at))
       .take(INGEST.batchMessages);
     const batch: MessageRow[] = [];
     let chars = 0;
@@ -477,7 +477,8 @@ export const commit = internalMutation({
     }
     for (const c of a.confirm) {
       const m = await memoryDoc(ctx, a.scope, c.id);
-      if (m) await ctx.db.patch(m._id, { sources: [...new Set([...m.sources, ...c.sources])].slice(-INGEST.maxSources), confidence: Math.min(1, m.confidence + c.step) });
+      // A memory forgotten (or replaced) since the plan was made gains nothing: its words stay withheld.
+      if (m?.current) await ctx.db.patch(m._id, { sources: [...new Set([...m.sources, ...c.sources])].slice(-INGEST.maxSources), confidence: Math.min(1, m.confidence + c.step) });
     }
     for (const c of a.confidence) {
       const m = await memoryDoc(ctx, a.scope, c.id);
@@ -507,9 +508,8 @@ export const byTopic = internalQuery({
   handler: async (ctx, { scope, topic }): Promise<StoredMemory[]> => {
     const rows = await ctx.db
       .query('memories')
-      .withIndex('by_scope_topic', (q) => q.eq('scope', scope).eq('topic', topic))
+      .withIndex('by_scope_current_topic', (q) => q.eq('scope', scope).eq('current', true).eq('topic', topic))
       .order('desc')
-      .filter((q) => q.eq(q.field('current'), true))
       .take(50);
     return rows.map(storedOf);
   },
@@ -546,8 +546,7 @@ export const hydrate = internalQuery({
 async function underTopic(ctx: Pick<QueryCtx, 'db'>, scope: ScopeId, topic: string, limit: number): Promise<MemoryRow[]> {
   const rows = await ctx.db
     .query('memories')
-    .withIndex('by_scope_topic', (q) => q.eq('scope', scope).gte('topic', topic).lte('topic', `${topic}.￿`))
-    .filter((q) => q.eq(q.field('current'), true))
+    .withIndex('by_scope_current_topic', (q) => q.eq('scope', scope).eq('current', true).gte('topic', topic).lte('topic', `${topic}.￿`))
     .take(limit * 4);
   return rows
     .filter((m) => m.topic === topic || m.topic!.startsWith(`${topic}.`))
@@ -584,7 +583,7 @@ export const channels = internalQuery({
           .withIndex('by_scope_used', (q) => q.eq('scope', scope))
           .order('desc')
           .take(a.topicLimit ?? LIMITS.topics);
-        for (const t of topicsIn(a.guess, known.map((k) => k.topic))) topics.add(t);
+        for (const t of topicsIn(a.guess, known.map((k) => k.topic)).slice(0, LIMITS.topicGuesses)) topics.add(t);
       }
       const topic: MemoryRow[] = [];
       const seen = new Set<string>();
@@ -656,8 +655,8 @@ export const currentOfTopic = internalQuery({
   handler: async (ctx, a): Promise<MemoryItem[]> => {
     const rows = await ctx.db
       .query('memories')
-      .withIndex('by_scope_topic', (q) => q.eq('scope', a.scope).eq('topic', a.topic))
-      .filter((q) => q.and(q.eq(q.field('current'), true), q.eq(q.field('kind'), a.kind)))
+      .withIndex('by_scope_current_topic', (q) => q.eq('scope', a.scope).eq('current', true).eq('topic', a.topic))
+      .filter((q) => q.eq(q.field('kind'), a.kind))
       .collect();
     return rows.sort((x, y) => y.recordedAt - x.recordedAt).map(itemOf);
   },
@@ -678,8 +677,8 @@ export const versionOf = internalQuery({
       ? (
           await ctx.db
             .query('memories')
-            .withIndex('by_scope_topic', (q) => q.eq('scope', a.scope).eq('topic', m.topic))
-            .filter((q) => q.and(q.eq(q.field('current'), true), q.eq(q.field('kind'), m.kind)))
+            .withIndex('by_scope_current_topic', (q) => q.eq('scope', a.scope).eq('current', true).eq('topic', m.topic))
+            .filter((q) => q.eq(q.field('kind'), m.kind))
             .collect()
         ).filter((x) => x.memoryId !== head?.memoryId)
       : [];

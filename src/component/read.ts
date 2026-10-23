@@ -11,7 +11,7 @@ import { ANALYZE_SCHEMA, ANALYZE_SYSTEM, CONTEXT_GATE, SYNTHESIS_SYSTEM } from '
 import type { Decision } from './relate.js';
 import { fuse, interleave } from './rrf.js';
 import schema from './schema.js';
-import { checkFilter, checkLayers, fail, layerWeights, resolveScopes, scopeOfTags, type Layer, type ReadScope } from './scopes.js';
+import { checkFilter, checkLayers, fail, layerWeights, readableScope, resolveScopes, type Layer, type ReadScope } from './scopes.js';
 import {
   filterValidator,
   historyHitValidator,
@@ -77,12 +77,20 @@ function weighted(r: Reach, fused: { item: Found; score: number }[]): { item: Fo
 const memoryHit = (r: Reach, m: MemoryRow, score: number): MemoryHit => ({ ...hitOf(m, score), layer: layerName(r, m.scope) });
 const messageHit = (r: Reach, m: MessageRow, score: number): MessageHit => ({ ...messageHitOf(m, score), layer: layerName(r, m.scope) });
 
+/**
+ * Rows to read from each of `scopes` for a channel that answers `limit`: all of `limit` from a few scopes, a share of
+ * LIMITS.channelRows from many (at least LIMITS.rowsPerScope each), so a read of hundreds of scopes stays within a
+ * query's 16 MiB and an action's memory.
+ */
+export const perScope = (limit: number, scopes: number, least: number = LIMITS.rowsPerScope) => Math.max(1, Math.min(limit, Math.max(least, Math.ceil(LIMITS.channelRows / Math.max(1, scopes)))));
+
 /** Each scope's channels, in order: the scopes in groups, a query per group, the groups at once. */
 async function channelsOf(ctx: ActionCtx, r: Reach, a: { topics?: string[]; guess?: string; text?: string; messagesText?: string; limit: number; instructions?: number }): Promise<Channels[]> {
   const groups: ScopeId[][] = [];
   for (let i = 0; i < r.ids.length; i += LIMITS.scopesPerQuery) groups.push(r.ids.slice(i, i + LIMITS.scopesPerQuery));
   const topicLimit = Math.max(LIMITS.topicsPerScope, Math.floor(LIMITS.topics / Math.max(1, r.ids.length)));
-  const out = await Promise.all(groups.map((scopes) => ctx.runQuery(internal.store.channels, { scopes, topicLimit, ...a })));
+  const limit = perScope(a.limit, r.ids.length);
+  const out = await Promise.all(groups.map((scopes) => ctx.runQuery(internal.store.channels, { scopes, topicLimit, ...a, limit })));
   return out.flat();
 }
 
@@ -179,6 +187,8 @@ export const context = action({
   handler: async (ctx, a): Promise<{ note: string; memories: MemoryHit[]; gated: boolean; usage: MemoryUsage }> => {
     if (!a.turn.trim()) fail('invalid', 'A turn is needed');
     const r = await reach(ctx, a.filter, a.layers);
+    // Nothing to read: no model is asked anything.
+    if (!r.ids.length) return { note: '', memories: [], gated: false, usage: { models: [], costMicros: 0 } };
     const turn = clip(a.turn, LIMITS.turnChars, 'tail');
     const models = new Models(ctx, a.settings);
     const recent = a.recent ? clip(a.recent, CONTEXT.recentChars, 'tail') : '';
@@ -287,6 +297,7 @@ export const recall = action({
     const query = a.query.trim().slice(0, LIMITS.queryChars);
     if (!query) fail('invalid', 'A query is needed');
     const r = await reach(ctx, a.filter, a.layers);
+    if (!r.ids.length) return { memories: [], messages: [], answer: null, answerUntrusted: false, usage: { models: [], costMicros: 0 } };
     const limit = Math.max(1, Math.min(50, Math.floor(a.limit ?? 10)));
     const models = new Models(ctx, a.settings);
     const [analysis, raw] = await Promise.all([
@@ -363,16 +374,18 @@ export const searchHistory = query({
     const text = searchText([a.query.slice(0, LIMITS.queryChars)]);
     if (!text) return { hits: [] };
     const limit = Math.max(1, Math.min(50, Math.floor(a.limit ?? 20)));
+    // One query searches every scope here (not a query per group, as the actions do): one row each at the least.
+    const each = perScope(limit, r.ids.length, 1);
     const lists = await Promise.all(
       r.ids.map(async (scope) => ({
         memories: await ctx.db
           .query('memories')
           .withSearchIndex('search_text', (q) => q.search('searchText', text).eq('scope', scope).eq('current', true))
-          .take(limit),
+          .take(each),
         messages: await ctx.db
           .query('messages')
           .withSearchIndex('search_content', (q) => q.search('content', text).eq('scope', scope).eq('withheld', false))
-          .take(limit),
+          .take(each),
       })),
     );
     const fused = weighted(
@@ -408,7 +421,9 @@ export const list = query({
     const streams = r.ids.map((scope) => {
       const q = db.query('memories');
       const indexed = a.topic
-        ? q.withIndex('by_scope_topic', (x) => x.eq('scope', scope).eq('topic', a.topic))
+        ? history
+          ? q.withIndex('by_scope_topic', (x) => x.eq('scope', scope).eq('topic', a.topic))
+          : q.withIndex('by_scope_current_topic', (x) => x.eq('scope', scope).eq('current', true).eq('topic', a.topic))
         : a.kind && !history
           ? q.withIndex('by_scope_kind', (x) => x.eq('scope', scope).eq('current', true).eq('kind', a.kind!))
           : history
@@ -423,13 +438,13 @@ export const list = query({
   },
 });
 
-/** Every version of a topic, or of the chain a version is in, in the scope of `tags`, newest first (forgotten ones never). */
+/** Every version of a topic, or of the chain a version is in, in the scope of `tags`, newest first (forgotten ones never; nothing of a purged tag set). */
 export const history = query({
   args: { tags: v.array(v.string()), id: v.optional(v.string()), topic: v.optional(v.string()) },
   returns: v.object({ versions: v.array(memoryItemValidator) }),
   handler: async (ctx, a): Promise<{ versions: MemoryItem[] }> => {
     if (!a.id === !a.topic) fail('invalid', 'Give a topic or an id');
-    const s = await scopeOfTags(ctx, a.tags);
+    const s = await readableScope(ctx, a.tags);
     if (!s) return { versions: [] };
     const scope = s._id;
     if (a.topic) {
@@ -465,12 +480,12 @@ export const history = query({
   },
 });
 
-/** A memory version by id in the scope of `tags`, current or superseded; null for a forgotten one (it left every read). */
+/** A memory version by id in the scope of `tags`, current or superseded; null for a forgotten one (it left every read), or one of a purged tag set. */
 export const get = query({
   args: { tags: v.array(v.string()), id: v.string() },
   returns: v.union(memoryItemValidator, v.null()),
   handler: async (ctx, a): Promise<MemoryItem | null> => {
-    const s = await scopeOfTags(ctx, a.tags);
+    const s = await readableScope(ctx, a.tags);
     const m = s && (await memoryDoc(ctx, s._id, a.id));
     return m && m.forgottenAt === undefined ? itemOf(m) : null;
   },

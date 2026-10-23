@@ -65,7 +65,8 @@ export default defineSchema({
     .index('by_scope_message', ['scope', 'messageId'])
     .index('by_scope_session', ['scope', 'session', 'at'])
     .index('by_scope_pending', ['scope', 'processed', 'at'])
-    .index('by_pending', ['processed', 'at'])
+    .index('by_scope_pending_session', ['scope', 'processed', 'session', 'at'])
+    .index('by_pending_scope', ['processed', 'scope'])
     .searchIndex('search_content', { searchField: 'content', filterFields: ['scope', 'withheld'] }),
 
   memories: defineTable({
@@ -103,6 +104,7 @@ export default defineSchema({
     .index('by_scope_current', ['scope', 'current', 'recordedAt'])
     .index('by_scope_kind', ['scope', 'current', 'kind', 'recordedAt'])
     .index('by_scope_topic', ['scope', 'topic', 'recordedAt'])
+    .index('by_scope_current_topic', ['scope', 'current', 'topic', 'recordedAt'])
     .index('by_scope_recorded', ['scope', 'recordedAt'])
     .index('by_unvectorized', ['vectorized', 'current', 'kind'])
     .searchIndex('search_text', { searchField: 'searchText', filterFields: ['scope', 'current'] }),

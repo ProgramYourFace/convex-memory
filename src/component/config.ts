@@ -178,9 +178,21 @@ export const LIMITS = {
   /** Topics the cheap topic guess reads per read (shared among its scopes, at least `topicsPerScope` each). */
   topics: 2_000,
   topicsPerScope: 50,
+  /** Topics the guess looks up per scope at most (each is an index range). */
+  topicGuesses: 16,
+  /**
+   * Rows each search channel reads per read, shared among the scopes it reaches (each scope still gives at least
+   * `rowsPerScope`): a message may be 20,000 characters, and a query reads at most 16 MiB.
+   */
+  channelRows: 80,
+  rowsPerScope: 2,
   /** Decisions and usage rows are kept this long. */
   logKeepMs: 90 * 24 * 3_600_000,
   /** Rows a purge or a sweep deletes per mutation, and of the record's messages (up to ~80 KB each) at most. */
   deletePage: 500,
   deleteMessagesPage: 100,
+  /** What erasing one tag set costs of `deletePage` beyond its rows (its index reads), so a page reaches at most ~50 sets. */
+  scopeEraseCost: 10,
+  /** Scopes with unread messages the sweep checks per run (one message read each). */
+  sweepScopes: 100,
 } as const;
