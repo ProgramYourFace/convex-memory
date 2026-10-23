@@ -1,7 +1,10 @@
 {
   "name": "convex-memory",
   "description": "Layered long-term memory for AI agents as a Convex component: a versioned record, background ingest, and budgeted recall",
-  "repository": "github:ProgramYourFace/convex-memory",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ProgramYourFace/convex-memory.git"
+  },
   "homepage": "https://github.com/ProgramYourFace/convex-memory#readme",
   "bugs": {
     "url": "https://github.com/ProgramYourFace/convex-memory/issues"
@@ -32,7 +35,9 @@
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "!src/**/*.test.ts",
+    "!src/**/*.testing.ts"
   ],
   "exports": {
     "./package.json": "./package.json",
