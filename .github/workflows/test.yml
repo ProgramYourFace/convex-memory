@@ -23,6 +23,7 @@ jobs:
         with:
           cache-dependency-path: package-lock.json
           node-version: "24.x"
+          check-latest: true
           cache: "npm"
 
       - name: Install and build
